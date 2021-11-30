@@ -16,4 +16,15 @@ extractable_regions = ["TextRegion",
                        "CustomRegion",
                        "TextLine"]
 
+predictable_regions = ["TextRegion",
+                       "TableRegion",
+                       "ChartRegion",
+                       "MapRegion",
+                       "MusicRegion",
+                       "AdvertRegion",
+                       "UnknownRegion",
+                       "CustomRegion",
+                       "TextLine",
+                       "TableCell"]
+
 TEXT_COUNT_SUPPORTED_ELEMS = ["TextRegion", "TextLine", "Word"]
