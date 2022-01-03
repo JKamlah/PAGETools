@@ -93,15 +93,45 @@ class Predictor:
 
     def boundingbox2coords(self, bbox):
         return ((bbox[0], bbox[1]),
-                (bbox[0], bbox[3]),
+                (bbox[2], bbox[1]),
                 (bbox[2], bbox[3]),
-                (bbox[2], bbox[1]))
+                (bbox[0], bbox[3]))
 
     def coords2str(self, coords):
         return ' '.join([f"{point[0]},{point[1]}" for point in coords])
 
     def coords2pagecoords(self, coords, offset):
         return [(point[0]-self.padding[0]+offset[0], point[1]-self.padding[2]+offset[1]) for point in coords]
+
+    @staticmethod
+    def fit_baseline2bbox(baseline: List, bbox: List) -> List:
+        fitted_baseline = []
+        for baselinepoint in baseline:
+            if not (bbox[1] <= baselinepoint[1] <= bbox[3]):
+                baselinepoint = (baselinepoint[0], int((bbox[3]-bbox[1])*0.67)+bbox[1])
+            if baselinepoint[0] < bbox[0] and not fitted_baseline:
+                fitted_baseline.append((bbox[0], baselinepoint[1]))
+            elif baselinepoint[0] > bbox[2]:
+                if not fitted_baseline:
+                    fitted_baseline.extend([(bbox[0], baselinepoint[1]),(bbox[2], baselinepoint[1])])
+                else:
+                    fitted_baseline.append((bbox[2], baselinepoint[1]))
+                break
+            else:
+                fitted_baseline.append(baselinepoint)
+        return fitted_baseline
+
+    def shrink_bbox(self, bbox: list, symbol_bbox: list) -> list:
+        if len(symbol_bbox) > 1:
+            if abs(symbol_bbox[0][2] - symbol_bbox[0][0]) > abs(symbol_bbox[0][1] - symbol_bbox[0][3]) * 2:
+                bbox[0] = symbol_bbox[1][0]
+            elif bbox[0] < (symbol_bbox[0][0]-abs(symbol_bbox[-1][1] - symbol_bbox[-1][3])*2):
+                bbox[0] = symbol_bbox[0][0]
+            if abs(symbol_bbox[-1][2] - symbol_bbox[-1][0]) > abs(symbol_bbox[-1][1] - symbol_bbox[-1][3]) * 2:
+                bbox[2] = symbol_bbox[-2][2]
+            elif bbox[2] > (symbol_bbox[-1][2]+abs(symbol_bbox[-1][1] - symbol_bbox[-1][3])*2):
+                bbox[2] = symbol_bbox[-1][2]
+        return bbox
 
     # TODO: Rewrite as soon as PAGEpy is available
     def predict(self):
@@ -125,7 +155,22 @@ class Predictor:
                     ri = api.GetIterator()
                     line_index = 0
                     fulltext = ''
-                    for line in iterate_level(ri, RIL.TEXTLINE):
+                    symbol_bbox, symbol_bboxs = [], []
+                    for symbol_idx, symbol in enumerate(iterate_level(ri, RIL.SYMBOL)):
+                        if symbol.IsAtBeginningOf(RIL.TEXTLINE) and symbol_idx != 0:
+                            if len(symbol_bbox) > 4:
+                                symbol_bbox = symbol_bbox[0:2]+symbol_bbox[-2:]
+                            symbol_bboxs.append(symbol_bbox)
+                            symbol_bbox = []
+                        if not symbol.Empty(RIL.SYMBOL):
+                            symbol_bbox.append(symbol.BoundingBoxInternal(RIL.SYMBOL))
+                    else:
+                        if len(symbol_bbox) > 4:
+                            symbol_bbox = symbol_bbox[0:2] + symbol_bbox[-2:]
+                        symbol_bboxs.append(symbol_bbox)
+                    ri.RestartRow()
+                    ri.Begin()
+                    for lidx, line in enumerate(iterate_level(ri, RIL.TEXTLINE)):
                         print(f"{element_id}l{line_index}")
                         if not line.Empty(RIL.TEXTLINE):
                             """
@@ -139,22 +184,33 @@ class Predictor:
                             </TextLine >")
                             """
                             print(line.GetUTF8Text(RIL.TEXTLINE).strip())
+                            if line.GetUTF8Text(RIL.TEXTLINE).strip() == 'die Zinsſcheinne':
+                                stop = 1
                             ele_textline = etree.SubElement(entry['element'], 'TextLine',
                                                             {'id': f"{element_id}l{line_index}",
                                                             'custom': f"readingOrder {{index:{line_index};}}"})
                             offset = (min(x[0] for x in entry["coords"]), min(x[1] for x in entry["coords"]))
-                            etree.SubElement(ele_textline, 'Coords', {'points': self.coords2str(self.coords2pagecoords(self.boundingbox2coords(line.BoundingBox(RIL.TEXTLINE)), offset))})
-                            etree.SubElement(ele_textline, 'Baseline', {'points': self.coords2str(self.coords2pagecoords(line.Baseline(RIL.TEXTLINE),offset))})
-                            ele_textequiv = etree.SubElement(ele_textline, 'TextEquiv',
-                                                             {'index': str(self.pred_index),
-                                                              'conf': str(line.Confidence(RIL.TEXTLINE))})
+                            bbox = list(line.BoundingBox(RIL.TEXTLINE))
+                            baseline = line.Baseline(RIL.TEXTLINE)
+                            linetext = '���' if line.GetUTF8Text(RIL.TEXTLINE).strip() == '' else line.GetUTF8Text(RIL.TEXTLINE).strip()
+
+                            # Experimental find bbox which are to wide (use only for horizontal text)
+                            bbox = self.shrink_bbox(bbox, symbol_bboxs[lidx])
+                            baseline = self.fit_baseline2bbox(baseline, bbox)
+
+                            etree.SubElement(ele_textline, 'Coords', {'points': self.coords2str(self.coords2pagecoords(self.boundingbox2coords(bbox), offset))})
+                            etree.SubElement(ele_textline, 'Baseline', {'points': self.coords2str(self.coords2pagecoords(baseline, offset))})
+                            ele_textequiv = etree.SubElement(ele_textline, 'TextEquiv')#,
+                                                             #{'index': str(self.pred_index),
+                                                              #'conf': str(line.Confidence(RIL.TEXTLINE))})
                             ele_unicode = etree.SubElement(ele_textequiv, 'Unicode')
-                            ele_unicode.text = '???' if line.GetUTF8Text(RIL.TEXTLINE).strip() == '' else line.GetUTF8Text(RIL.TEXTLINE).strip()
+                            ele_unicode.text = linetext
                             fulltext += ele_unicode.text+'\n'
                             line_index += 1
                         else:
                             print("No text found!")
-                    if fulltext != '':
+                    # Does only TextRegion need a fulltext summary of TextLines?
+                    if fulltext != '' and entry['element'].tag.rsplit('}', 1)[-1] in ['TextRegion']:
                         ele_textregion = etree.SubElement(entry['element'], 'TextEquiv')
                         ele_unicode = etree.SubElement(ele_textregion, 'Unicode')
                         ele_unicode.text = fulltext
