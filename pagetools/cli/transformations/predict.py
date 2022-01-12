@@ -43,7 +43,7 @@ available_regions.append("*")
 @click.option("-pred", "--pred-index", type=int, default=1, help="Index of the TextEquiv elements containing predicted "
                                                                  "text.")
 @click.option("-s/-us", "--safe/--unsafe", default=True, help="Creates backups of original files before overwriting.")
-def predict_cli(xmls: List[str], include: List[str], exclude: List[str], skip_existing: bool, image_extension: str,
+def predict_cli(xmls: List[Path], include: List[str], exclude: List[str], skip_existing: bool, image_extension: str,
                 engine: str, lang: str, output: Path, background_color: Tuple[int], background_mode: str,
                 padding: Tuple[int], pred_index: int, auto_deskew: bool, deskew: float, safe: bool):
 
