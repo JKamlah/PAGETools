@@ -69,6 +69,8 @@ def predict_cli(xmls: List[Path], include: List[str], exclude: List[str], skip_e
         for page_idx, (xml, images) in enumerate(files):
             predictor = Predictor(xml, images, include, exclude, engine, lang, output, bg, padding, auto_deskew,
                                   deskew, pred_index, skip_existing)
+            if not any(images) or  '.old' in xml.name or Path(xml.parent, xml.stem).with_suffix(f".old{get_suffix(xml)}").exists():
+                continue
             predictor.predict()
             if safe:
                 shutil.move(xml, Path(xml.parent, xml.stem).with_suffix(f".old{get_suffix(xml)}"))
