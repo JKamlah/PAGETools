@@ -1,20 +1,19 @@
 from pagetools.src.Page import Page
 from pagetools.src.Image import Image, ProcessedImage
-from pagetools.src.utils import filesystem
 from pagetools.src.utils.constants import predictable_regions
 from pagetools.src.utils.page_processing import string_to_coords
 
 from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
-from typing import List, Iterator, Set, Tuple, Dict
+from typing import List, Set, Tuple
 
 from lxml import etree
 from PIL import Image as IMAGE
-import cv2
 import numpy as np
-from shapely.geometry import asPolygon, Polygon, LineString
+from shapely.geometry import asPolygon, Polygon, Point, LineString, MultiPoint
 from shapely.ops import unary_union
+from shapely.affinity import scale, translate
 
 class Predictor:
     def __init__(self, xml: Path, images: List[Path], include: List[str], exclude: List[str], engine: str, lang: str,
@@ -103,7 +102,7 @@ class Predictor:
                 (bbox[0], bbox[3]))
 
     def coords2str(self, coords):
-        return ' '.join([f"{point[0]},{point[1]}" for point in coords])
+        return ' '.join([f"{np.around(point[0])},{np.around(point[1])}" for point in coords])
 
     def coords2pagecoords(self, coords, offset):
         return coords - (np.array([self.padding[0], self.padding[2]]) - np.array([offset[0], offset[1]]))
@@ -128,18 +127,32 @@ class Predictor:
         return fitted_baseline
 
     @staticmethod
-    def fit_baseline2polygon(baseline: List, basic_baseline: List, polygon: List) -> List:
+    def fit_baseline2polygon(baseline: List, basic_baseline: List, line_polygon: Polygon) -> LineString:
         # Create an upper and lower bound for the polygon and interpolate it to the points of the baseline
-        lower_bound = polygon[np.argmax(polygon, axis=0)[0][0] + 1:][::-1]
-        lower_bound_xy = list(zip(*[point[0] for point in lower_bound.tolist()]))
-        upper_bound = polygon[:np.argmax(polygon, axis=0)[0][0] + 1]
-        upper_bound_xy = list(zip(*[point[0] for point in upper_bound.tolist()]))
-        min_x, max_x = lower_bound_xy[0][0], lower_bound_xy[0][-1]
+        boundary = np.asarray(line_polygon.exterior)
+        # Deduplicate
+        _, idx = np.unique(boundary, return_index=True, axis=0)
+        boundary = boundary[np.sort(idx)]
+        # Get splitting point
+        splitting_point_idx = np.argmax(boundary, axis=0)[0]
+        if 2 < splitting_point_idx < len(boundary)-1 and \
+            boundary[splitting_point_idx][1] > list(line_polygon.exterior.centroid.coords)[0][1]:
+            splitting_point_idx -= 1
+        lower_boundary = boundary[splitting_point_idx + 1:][::-1]
+        lower_boundary_xy = list(zip(*[point for point in lower_boundary.tolist()]))
+        upper_boundary = boundary[1:splitting_point_idx + 1]
+        upper_boundary_xy = list(zip(*[point for point in upper_boundary.tolist()]))
+        min_x, max_x = lower_boundary_xy[0][0], lower_boundary_xy[0][-1]
         # Convert baseline to points and deduplicate points if needed
         fitted_baseline = []
         sorted_baselinepoints = sorted([list(baselinepoint) for baselinepoints in baseline for baselinepoint in baselinepoints])
         deduplicated_sorted_baselinepoints = [point for idx, point in enumerate(sorted_baselinepoints) if
                                               (idx == 0 or point[0] != sorted_baselinepoints[idx-1][0])]
+        baseline_poly = LineString(deduplicated_sorted_baselinepoints)
+
+        if line_polygon.contains(baseline_poly):
+            return baseline_poly
+
         #Create an x and y array of the baseline points
         baseline_xy = list(zip(*deduplicated_sorted_baselinepoints))
         basic_baseline_xy = list(zip(*basic_baseline))
@@ -147,42 +160,53 @@ class Predictor:
         # Add baseline for whole line as fallback
         new_baseline_x = sorted((point for point in set(baseline_xy[0]+(max_x, min_x)) if  min_x <= point <= max_x))
 
-        lower_interp_y = np.interp(new_baseline_x, lower_bound_xy[0], lower_bound_xy[1]).astype(np.int32)
-        upper_interp_y = np.interp(new_baseline_x, upper_bound_xy[0], upper_bound_xy[1]).astype(np.int32)
+        lower_interp_y = np.interp(new_baseline_x, lower_boundary_xy[0], lower_boundary_xy[1]).astype(np.int32)
+        upper_interp_y = np.interp(new_baseline_x, upper_boundary_xy[0], upper_boundary_xy[1]).astype(np.int32)
 
         basic_baseline_interp_y = np.interp(new_baseline_x, basic_baseline_xy[0], basic_baseline_xy[1]).astype(np.int32).tolist()
 
-        # Generate an artificial baseline by 1/3 between upper and lower bound
+        # Generate an artificial baseline by 1/3 between upper and lower boundary
         midline_y = [np.mean([lower_interp_y[i], upper_interp_y[i]], dtype=np.int32) for i in range(0, len(new_baseline_x))]
         new_baseline_y = [np.mean([midline_y[i], lower_interp_y[i]], dtype=np.int32) for i in range(0, len(new_baseline_x))]
 
+        # Generate polygons
+        #new_baseline_poly = LineString(zip(new_baseline_x, new_baseline_y))
+        #basic_baseline_interp_poly = LineString(zip(new_baseline_x, basic_baseline_interp_y))
+
         def get_y_value(x_val, index, basic_baseline_y, new_baseline_y):
             # Check if the basic_baseline has a valid point or take the artificial generated one
-            if cv2.pointPolygonTest(polygon, (x_val, basic_baseline_y[index]), False) >= 0:
+            if line_polygon.contains(Point(x_val, basic_baseline_y[index])):
                     return basic_baseline_y[index]
             else:
                 return new_baseline_y[index]
 
         # Fit the baseline into polygon if necessary take points of the artificial baseline
-        for xval_idx, baseline_xval in enumerate(baseline_xy[0]):
-            if baseline_xval >= min_x:
-                if baseline_xval > max_x:
+        for coords_idx, (x_val, y_val) in enumerate(baseline_poly.coords):
+            if x_val >= min_x:
+                if x_val > max_x:
+                    if not len(fitted_baseline) > 0:
+                       fitted_baseline.append((min_x, get_y_value(min_x, -1, basic_baseline_interp_y, new_baseline_y)))
                     if fitted_baseline[-1][0] <= max_x:
                         fitted_baseline.append((max_x, get_y_value(max_x, -1, basic_baseline_interp_y, new_baseline_y)))
                         break
-                elif not fitted_baseline and xval_idx > 0:
-                    fitted_baseline.append((baseline_xy[0][xval_idx], get_y_value(new_baseline_x[0], 0, basic_baseline_interp_y, new_baseline_y)))
-                elif cv2.pointPolygonTest(polygon, (baseline_xy[0][xval_idx], baseline_xy[1][xval_idx]), False) < 0:
-                    fitted_baseline.append((baseline_xy[0][xval_idx], get_y_value(baseline_xy[0][xval_idx], new_baseline_x.index(baseline_xval), basic_baseline_interp_y, new_baseline_y)))
+                elif not fitted_baseline and coords_idx > 0:
+                    fitted_baseline.append((baseline_xy[0][coords_idx], get_y_value(new_baseline_x[0], 0,
+                                                                                    basic_baseline_interp_y,
+                                                                                    new_baseline_y)))
+                elif not line_polygon.contains(Point(baseline_xy[0][coords_idx], baseline_xy[1][coords_idx])):
+                    fitted_baseline.append((baseline_xy[0][coords_idx], get_y_value(baseline_xy[0][coords_idx],
+                                                                                    new_baseline_x.index(x_val),
+                                                                                    basic_baseline_interp_y,
+                                                                                    new_baseline_y)))
                 else:
-                    fitted_baseline.append((baseline_xy[0][xval_idx], baseline_xy[1][xval_idx]))
-            elif xval_idx == 0 and baseline_xy[0][xval_idx+1] > new_baseline_x[-1]:
+                    fitted_baseline.append((baseline_xy[0][coords_idx], baseline_xy[1][coords_idx]))
+            elif coords_idx == 0 and baseline_xy[0][coords_idx+1] > new_baseline_x[-1]:
                 fitted_baseline.append((new_baseline_y[0], new_baseline_y[0]))
-        fitted_baseline = list(set(fitted_baseline))
+        #fitted_baseline = list(set(fitted_baseline))
         if len(fitted_baseline) < 2:
             fitted_baseline = [(min_x, get_y_value(min_x, -1, basic_baseline_interp_y, new_baseline_y)),
                                (max_x, get_y_value(max_x, -1, basic_baseline_interp_y, new_baseline_y))]
-        return fitted_baseline
+        return LineString(fitted_baseline)
 
     def tesseract_symbol_bboxs_and_baselines(self, ri, RIL, iterate_level):
         bbox, bboxs = [], []
@@ -212,29 +236,20 @@ class Predictor:
 
     def polygon_from_bboxs(self, bboxs):
         # Calculate polygon
-        points = [coords for bbox in bboxs for coords in self.boundingbox2coords(bbox)]
-        polygon = cv2.convexHull(np.array(points, dtype=np.int32), False)
-        return polygon
+        return MultiPoint([coords for bbox in bboxs for coords in self.boundingbox2coords(bbox)]).convex_hull
 
     def fit_line_to_region_polygon(self, line_polygon, region_polygon):
-        from shapely.geometry import Polygon
-        p1 = Polygon([point[0] for point in line_polygon.tolist()])
-        p2 = Polygon([point[0] for point in region_polygon.tolist()])
-        intersection = p1.intersection(p2)
-        convex_hull = intersection.convex_hull
-        return (None, np.array([[point] for point in np.asarray(convex_hull.boundary, dtype=np.int32).tolist()]))
-        fitted_polygon_area, fitted_polygon = cv2.intersectConvexConvex(line_polygon, region_polygon)
-        # Check if polygon really are in the region_polygon (this is needed atm)
-        fitted_polygon = np.array([[point] for points in fitted_polygon.tolist() for point in points if cv2.pointPolygonTest(region_polygon, tuple(point), False) > -1])
-        if len(fitted_polygon) < 2:
-            fitted_polygon = region_polygon
-        return fitted_polygon_area, fitted_polygon.astype(np.int32)
+        intersection = line_polygon.intersection(region_polygon)
+        return intersection.convex_hull
 
-    def rotate_polygon_to_start_from_left_top(self, polygon):
-        min_idx = np.argmin(polygon, axis=0)[0][0]
-        if min_idx != 0 or polygon[0][0][0] != polygon[0][0][-1]:
-            polygon = np.concatenate((polygon[min_idx + 1:], polygon[:min_idx + 1]), axis=0)
-        return polygon
+    def rotate_polygon_to_start_from_left_top(self, line_polygon):
+        ring = np.asarray(list(line_polygon.exterior.coords)[::-1])
+        min_idx = np.argmin(ring, axis=0)[0]
+        if ring[min_idx][1] < list(line_polygon.exterior.centroid.coords)[0][1]:
+            min_idx -= 1
+        if min_idx != 0 or tuple(ring[0]) != tuple(ring[-1]):
+            ring = np.concatenate((ring[min_idx + 1:], ring[:min_idx + 1]), axis=0)
+        return Polygon(ring)
 
     # TODO: Rewrite as soon as PAGEpy is available
     def predict(self):
@@ -247,7 +262,7 @@ class Predictor:
             from tesserocr import PyTessBaseAPI, RIL, iterate_level
             with PyTessBaseAPI(lang=self.lang) as api:
                 for element_id, entry in data.items():
-                    #if '578_3003' not in element_id:
+                    #if '839_2001' in element_id:
                     #    continue
                     img = deepcopy(img_orig)
                     img.orientation = entry["orientation"]
@@ -257,10 +272,9 @@ class Predictor:
                     elif self.auto_deskew:
                         img.auto_deskew()
 
-                    region_coords = entry["coords"] - \
-                                     ([entry["coords"].min(axis=0)] - np.array([self.padding[0], self.padding[2]]))
-                    region_polygon = np.array([[coord] for coord in region_coords.tolist()])
-                    polygon = None
+                    region_polygon = MultiPoint(entry["coords"] - \
+                                     ([entry["coords"].min(axis=0)] - np.array([self.padding[0], self.padding[2]]))).convex_hull
+                    line_polygon = Polygon()
 
                     api.SetImage(IMAGE.fromarray(img.img))
 
@@ -272,15 +286,18 @@ class Predictor:
                         if any(symbol_bboxs) or entry['type'] != 'TableCell':
                             break
                     else:
-                        polygon = cv2.convexHull(region_polygon - np.array([-3, -3]), False)
-                        symbol_baselines[0] = [((self.padding[0], img.img.shape[1]), (img.img.shape[0]-self.padding[1], img.img.shape[1]))]
+                        line_polygon = scale(region_polygon, xfact=0.75, yfact=0.75, origin='centroid').convex_hull
+                        symbol_baselines[0] = [((self.padding[0],
+                                                 img.img.shape[1]),
+                                                (img.img.shape[0]-self.padding[1],
+                                                 img.img.shape[1]))]
 
                     line_index = 0
                     fulltext = ''
 
                     for lidx, line in enumerate(iterate_level(ri, RIL.TEXTLINE)):
                         print(f"{element_id}l{line_index}")
-                        if not line.Empty(RIL.TEXTLINE) or polygon is not None:
+                        if not line.Empty(RIL.TEXTLINE) or not line_polygon.is_empty:
                             """
                             textline = etree.XML(f"<TextLine id="{entry['id']}l{line_index}" 
                             custom="readingOrder {{index:{line_index};}}">
@@ -301,22 +318,27 @@ class Predictor:
                             else:
                                 linetext = '���'
                                 baseline = [point[0] for point in symbol_baselines[lidx]]
-                            # The basic bbox list(line.BoundingBox(RIL.TEXTLINE)) is currently not used
-                            # Experimental find bbox which are to wide (use only for horizontal text)
-                            if polygon is None:
+                            if line_polygon.is_empty:
+                                # The basic bbox list(line.BoundingBox(RIL.TEXTLINE)) is currently not used
+                                # Experimental find bbox which are to wide (use only for horizontal text)
                                 bboxs = self.shrink_bboxs(symbol_bboxs[lidx])
                                 # Add missing points
-                                polygon = self.polygon_from_bboxs(bboxs)
-                                poly_area, polygon = self.fit_line_to_region_polygon(polygon, region_polygon)
-                            polygon = self.rotate_polygon_to_start_from_left_top(polygon)
+                                line_polygon = self.polygon_from_bboxs(bboxs)
+                                line_polygon = self.fit_line_to_region_polygon(line_polygon, region_polygon)
                             # The basic_baseline matching (fit_baseline2bbox(baseline, bbox)) is currently not used
                             # Fitting the baseline into the polygon
-                            baseline = self.fit_baseline2polygon(symbol_baselines[lidx], baseline, polygon)
+                            line_polygon = self.rotate_polygon_to_start_from_left_top(line_polygon)
+                            baseline_linestring = self.fit_baseline2polygon(symbol_baselines[lidx], baseline, line_polygon)
+
+                            # Add offset to polygons/lines
+                            line_polygon = translate(line_polygon, xoff=offset[0]-self.padding[0], yoff=offset[1]-self.padding[2])
+                            baseline_linestring = translate(baseline_linestring, xoff=offset[0]-self.padding[0], yoff=offset[1]-self.padding[2])
+
                             ele_textline = etree.SubElement(entry['element'], 'TextLine',
                                                             {'id': f"{element_id}l{line_index}",
                                                             'custom': f"readingOrder {{index:{line_index};}}"})
-                            etree.SubElement(ele_textline, 'Coords', {'points': self.coords2str([point[0] for point in self.coords2pagecoords(polygon, offset).tolist()])})
-                            etree.SubElement(ele_textline, 'Baseline', {'points': self.coords2str(self.coords2pagecoords(baseline, offset))})
+                            etree.SubElement(ele_textline, 'Coords', {'points': self.coords2str(list(line_polygon.exterior.coords))})
+                            etree.SubElement(ele_textline, 'Baseline', {'points': self.coords2str(list(baseline_linestring.coords))})
                             # Writing TextEquiv parameters but index and conf aren't added currently
                             # not included: {'index': str(self.pred_index), 'conf': str(line.Confidence(RIL.TEXTLINE))})
                             ele_textequiv = etree.SubElement(ele_textline, 'TextEquiv')
@@ -324,7 +346,7 @@ class Predictor:
                             ele_unicode.text = linetext
                             fulltext += ele_unicode.text+'\n'
                             line_index += 1
-                            polygon = None
+                            line_polygon = Polygon()
                         else:
                             print("No text found!")
                     # Does only TextRegion need a fulltext summary of TextLines?
