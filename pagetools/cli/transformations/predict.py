@@ -29,7 +29,12 @@ available_regions.append("*")
 @click.option("-e", "--engine", default="tesseract", type=click.Choice(["tesseract"], case_sensitive=False),
               help="OCR-Engine to find lines and predict text.")
 @click.option("-l", "--lang", type=str, default="eng", help="Modelname/Checkpoint to predict.")
-@click.option("-o", "--output", type=click.Path(path_type=Path), default=Path.cwd(), help="Path where generated files will get saved.")
+@click.option("-psm", default=[4, 7], type=int, multiple=True,
+              help="Pagesegementation modes to process the area. If one fails the next psm will be used (4, 7)")
+@click.option("-placeholder", "--textline-placeholder", is_flag=True,
+              help="If no text is found in the region an textline placholder will be created")
+@click.option("-o", "--output", type=click.Path(path_type=Path), default=Path.cwd(),
+              help="Path where generated files will get saved.")
 @click.option("-bg", "--background-color", nargs=3, default=(255, 255, 255), type=int,
               help="RGB color code used to fill up background. Used when padding and / or deskewing.")
 @click.option("--background-mode", type=click.Choice(["median", "mean", "dominant"]),
@@ -44,8 +49,9 @@ available_regions.append("*")
                                                                  "text.")
 @click.option("-s/-us", "--safe/--unsafe", default=True, help="Creates backups of original files before overwriting.")
 def predict_cli(xmls: List[Path], include: List[str], exclude: List[str], skip_existing: bool, image_extension: str,
-                engine: str, lang: str, output: Path, background_color: Tuple[int], background_mode: str,
-                padding: Tuple[int], pred_index: int, auto_deskew: bool, deskew: float, safe: bool):
+                engine: str, lang: str, psm: Tuple[int], textline_placeholder: bool, output: Path,
+                background_color: Tuple[int], background_mode: str, padding: Tuple[int], pred_index: int,
+                auto_deskew: bool, deskew: float, safe: bool):
 
     if engine == 'tesseract' and 'tesserocr' in sys.modules:
         "Please install tesserocr (with wheels) to use tesseract engine"
@@ -67,10 +73,12 @@ def predict_cli(xmls: List[Path], include: List[str], exclude: List[str], skip_e
     with click.progressbar(iterable=file_dict.items(), fill_char=click.style("█", dim=True),
                            label="Predicting text lines…") as files:
         for page_idx, (xml, images) in enumerate(files):
-            predictor = Predictor(xml, images, include, exclude, engine, lang, output, bg, padding, auto_deskew,
-                                  deskew, pred_index, skip_existing)
-            if not any(images) or  '.old' in xml.name or Path(xml.parent, xml.stem).with_suffix(f".old{get_suffix(xml)}").exists():
+            predictor = Predictor(xml, images, include, exclude, engine, lang, psm, textline_placeholder, output, bg,
+                                  padding, auto_deskew, deskew, pred_index, skip_existing)
+            if not any(images) or \
+                    '.old' in xml.name or Path(xml.parent, xml.stem).with_suffix(f".old{get_suffix(xml)}").exists():
                 continue
+            print(f"Start prediction for {xml.name}")
             predictor.predict()
             if safe:
                 shutil.move(xml, Path(xml.parent, xml.stem).with_suffix(f".old{get_suffix(xml)}"))
