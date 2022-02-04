@@ -1,19 +1,20 @@
-from pagetools.src.Page import Page
-from pagetools.src.Image import Image, ProcessedImage
-from pagetools.src.utils.constants import predictable_regions
-from pagetools.src.utils.page_processing import string_to_coords
-
 from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
 from typing import List, Set, Tuple
 
-from lxml import etree
-from PIL import Image as IMAGE
 import numpy as np
+from PIL import Image as IMAGE
+from lxml import etree
+from shapely.affinity import scale, translate
 from shapely.geometry import Polygon, Point, LineString, MultiPoint
 from shapely.ops import split
-from shapely.affinity import scale, translate
+
+from pagetools.src.Image import Image, ProcessedImage
+from pagetools.src.Page import Page
+from pagetools.src.utils.constants import predictable_regions
+from pagetools.src.utils.page_processing import string_to_coords
+
 
 class Predictor:
     def __init__(self, xml: Path, images: List[Path], include: List[str], exclude: List[str], engine: str, lang: str,
@@ -125,8 +126,8 @@ class Predictor:
         # Get splitting point
         splitting_point_idx = np.argmax(boundary, axis=0)[0]
         # Check if splitting point is above the centroid else take the next polygon as splitting point
-        if not 2 < splitting_point_idx < len(boundary)-2 and \
-            boundary[splitting_point_idx][1] > list(line_polygon.exterior.centroid.coords)[0][1]:
+        if not 2 < splitting_point_idx < len(boundary) - 2 and \
+                boundary[splitting_point_idx][1] > list(line_polygon.exterior.centroid.coords)[0][1]:
             splitting_point_idx -= 1
         # Create a lower and upper boundary based on the splitting point
         lower_boundary = boundary[splitting_point_idx + 1:][::-1]
@@ -140,7 +141,7 @@ class Predictor:
         sorted_baselinepoints = sorted([list(baselinepoint) for baselinepoints in baseline
                                         for baselinepoint in baselinepoints])
         deduplicated_sorted_baselinepoints = [point for idx, point in enumerate(sorted_baselinepoints) if
-                                              (idx == 0 or point[0] != sorted_baselinepoints[idx-1][0])]
+                                              (idx == 0 or point[0] != sorted_baselinepoints[idx - 1][0])]
         baseline_poly = LineString(deduplicated_sorted_baselinepoints)
 
         if line_polygon.covers(baseline_poly):
@@ -150,7 +151,7 @@ class Predictor:
             centroid_pt = list(line_polygon.centroid.coords)[0]
             return LineString([centroid_pt, centroid_pt])
 
-        #Create an x and y array of the baseline points
+        # Create an x and y array of the baseline points
         baseline_xy = list(zip(*deduplicated_sorted_baselinepoints))
         if basic_baseline != []:
             basic_baseline_xy = list(zip(*basic_baseline))
@@ -158,7 +159,7 @@ class Predictor:
             basic_baseline_xy = baseline_xy
 
         # Add baseline for whole line as fallback
-        new_baseline_x = sorted((point for point in set(baseline_xy[0]+(max_x, min_x)) if min_x <= point <= max_x))
+        new_baseline_x = sorted((point for point in set(baseline_xy[0] + (max_x, min_x)) if min_x <= point <= max_x))
 
         lower_interp_y = np.interp(new_baseline_x, lower_boundary_xy[0], lower_boundary_xy[1]).astype(np.int32)
         upper_interp_y = np.interp(new_baseline_x, upper_boundary_xy[0], upper_boundary_xy[1]).astype(np.int32)
@@ -175,7 +176,7 @@ class Predictor:
         def get_y_value(x_val, index, basic_baseline_y, new_baseline_y):
             """ Check if the basic_baseline has a valid point or take the artificial generated one """
             if line_polygon.covers(Point(x_val, basic_baseline_y[index])):
-                    return basic_baseline_y[index]
+                return basic_baseline_y[index]
             else:
                 return new_baseline_y[index]
 
@@ -184,7 +185,7 @@ class Predictor:
             if x_val >= min_x:
                 if x_val > max_x:
                     if not len(fitted_baseline) > 0:
-                       fitted_baseline.append((min_x, get_y_value(min_x, -1, basic_baseline_interp_y, new_baseline_y)))
+                        fitted_baseline.append((min_x, get_y_value(min_x, -1, basic_baseline_interp_y, new_baseline_y)))
                     if fitted_baseline[-1][0] <= max_x:
                         fitted_baseline.append((max_x, get_y_value(max_x, -1, basic_baseline_interp_y, new_baseline_y)))
                         break
@@ -199,17 +200,18 @@ class Predictor:
                                                                                     new_baseline_y)))
                 else:
                     fitted_baseline.append((baseline_xy[0][coords_idx], baseline_xy[1][coords_idx]))
-            elif coords_idx == 0 and baseline_xy[0][coords_idx+1] > new_baseline_x[-1]:
+            elif coords_idx == 0 and baseline_xy[0][coords_idx + 1] > new_baseline_x[-1]:
                 fitted_baseline.append((new_baseline_x[0], new_baseline_y[0]))
         fitted_baseline = [point for idx, point in enumerate(fitted_baseline) if
-                                              (idx == 0 or point[0] != fitted_baseline[idx-1][0])]
+                           (idx == 0 or point[0] != fitted_baseline[idx - 1][0])]
         if len(fitted_baseline) < 2:
             fitted_baseline = [(min_x, get_y_value(min_x, -1, basic_baseline_interp_y, new_baseline_y)),
                                (max_x, get_y_value(max_x, -1, basic_baseline_interp_y, new_baseline_y))]
         for pt_idx in [0, -1]:
             if not line_polygon.covers(Point(*fitted_baseline[pt_idx])):
                 from shapely.ops import nearest_points
-                fitted_baseline[pt_idx] = list(nearest_points(line_polygon, Point(*fitted_baseline[pt_idx]))[1].coords)[0]
+                fitted_baseline[pt_idx] = list(nearest_points(line_polygon,
+                                                              Point(*fitted_baseline[pt_idx]))[1].coords)[0]
 
         fitted_baseline = LineString(fitted_baseline)
 
@@ -292,7 +294,7 @@ class Predictor:
         if self.engine == 'tesseract':
             from tesserocr import PyTessBaseAPI, RIL, iterate_level
             with PyTessBaseAPI(lang=self.lang) as api:
-                for element_id, entry in data.items():
+                for element_idx, (element_id, entry) in enumerate(data.items()):
                     img = deepcopy(img_orig)
                     img.orientation = entry["orientation"]
                     img.cutout(shape=entry["coords"], padding=self.padding, background=self.background)
@@ -302,8 +304,9 @@ class Predictor:
                         img.auto_deskew()
 
                     region_polygon = MultiPoint(entry["coords"] - \
-                                     ([entry["coords"].min(axis=0)] - np.array([self.padding[0],
-                                                                                self.padding[2]]))).convex_hull
+                                                ([entry["coords"].min(axis=0)] - np.array([self.padding[0],
+                                                                                           self.padding[
+                                                                                               2]]))).convex_hull
                     line_polygon = Polygon()
 
                     api.SetImage(IMAGE.fromarray(img.img))
@@ -316,8 +319,10 @@ class Predictor:
                                                                                                    RIL, iterate_level)
                         if any(symbol_bboxs):
                             for idx, symbol_bbox in enumerate(symbol_bboxs):
-                                if not region_polygon.covers(Point(symbol_bbox[0][:2])) and not region_polygon.covers(Point(symbol_bbox[-1][2:])):
-                                    line_polygon, symbol_baselines[idx] = self.placeholder_linepoly_baseline(region_polygon, img)
+                                if not region_polygon.covers(Point(symbol_bbox[0][:2])) and \
+                                        not region_polygon.covers(Point(symbol_bbox[-1][2:])):
+                                    line_polygon, symbol_baselines[idx] = self.placeholder_linepoly_baseline(
+                                        region_polygon, img)
                             break
                     else:
                         if self.textline_placeholder:
@@ -327,7 +332,8 @@ class Predictor:
                     fulltext = ''
 
                     for lidx, line in enumerate(iterate_level(ri, RIL.TEXTLINE)):
-                        print(f"{element_id}l{line_index}")
+                        print(
+                            f"{self.xml.with_suffix('').name} ({element_idx + 1}/{len(data)}):\t{element_id}l{line_index}")
                         if not line.Empty(RIL.TEXTLINE) or not line_polygon.is_empty:
                             """ XML - Output example:
                             textline = etree.XML(f"<TextLine id="{entry['id']}l{line_index}" 
@@ -340,16 +346,15 @@ class Predictor:
                             </TextLine >")
                             """
                             offset = (min(x[0] for x in entry["coords"]), min(x[1] for x in entry["coords"]))
+                            linetext = '���'
+                            baseline = []
                             if not line.Empty(RIL.TEXTLINE):
                                 baseline = line.Baseline(RIL.TEXTLINE)
                                 linetext = '���' if line.GetUTF8Text(RIL.TEXTLINE).strip() == '' \
                                     else line.GetUTF8Text(RIL.TEXTLINE).strip()
                                 # Skip unrecognized textlines in the block end
-                                if linetext == '���' and lidx != 0 and lidx == len(symbol_bboxs)-1:
+                                if linetext == '���' and lidx != 0 and lidx == len(symbol_bboxs) - 1:
                                     continue
-                            else:
-                                linetext = '���'
-                                baseline = []
                             if line_polygon.is_empty:
                                 # The basic bbox list(line.BoundingBox(RIL.TEXTLINE)) is currently not used
                                 # Experimental find bbox which are to wide (use only for horizontal text)
@@ -358,7 +363,7 @@ class Predictor:
                                 line_polygon = self.polygon_from_bboxs(bboxs)
                                 line_polygon = self.fit_line_to_region_polygon(line_polygon, region_polygon)
                                 if line_polygon.is_empty or not isinstance(line_polygon, Polygon) or \
-                                        (line_polygon.length) < 4 or (line_polygon.area/line_polygon.length) < 4:
+                                        (line_polygon.length) < 4 or (line_polygon.area / line_polygon.length) < 4:
                                     line_polygon = scale(region_polygon,
                                                          xfact=0.75, yfact=0.75, origin='centroid').convex_hull
                             # Fitting the baseline into the polygon
@@ -367,14 +372,14 @@ class Predictor:
                                                                             baseline, line_polygon)
 
                             # Add offset to polygons/lines
-                            line_polygon = translate(line_polygon, xoff=offset[0]-self.padding[0],
-                                                     yoff=offset[1]-self.padding[2])
-                            baseline_linestring = translate(baseline_linestring, xoff=offset[0]-self.padding[0],
-                                                            yoff=offset[1]-self.padding[2])
+                            line_polygon = translate(line_polygon, xoff=offset[0] - self.padding[0],
+                                                     yoff=offset[1] - self.padding[2])
+                            baseline_linestring = translate(baseline_linestring, xoff=offset[0] - self.padding[0],
+                                                            yoff=offset[1] - self.padding[2])
 
                             ele_textline = etree.SubElement(entry['element'], 'TextLine',
                                                             {'id': f"{element_id}l{line_index}",
-                                                            'custom': f"readingOrder {{index:{line_index};}}"})
+                                                             'custom': f"readingOrder {{index:{line_index};}}"})
                             etree.SubElement(ele_textline, 'Coords',
                                              {'points': self.coords2str(list(line_polygon.exterior.coords))})
                             etree.SubElement(ele_textline, 'Baseline',
@@ -384,7 +389,7 @@ class Predictor:
                             ele_textequiv = etree.SubElement(ele_textline, 'TextEquiv')
                             ele_unicode = etree.SubElement(ele_textequiv, 'Unicode')
                             ele_unicode.text = linetext
-                            fulltext += ele_unicode.text+'\n'
+                            fulltext += ele_unicode.text + '\n'
                             line_index += 1
                             line_polygon = Polygon()
                         else:
