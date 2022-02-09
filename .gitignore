@@ -3,5 +3,5 @@
 /dist/
 /build/
 /PAGETools.egg-info/
-/venv/
+__pycache__
 /.idea/
