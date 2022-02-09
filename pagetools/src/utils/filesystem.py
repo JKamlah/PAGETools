@@ -69,10 +69,10 @@ def collect_files(xml_files: Iterator[Path], img_extension: str) -> Dict[Path, L
             file_dict[xml] = [image for image in xml.parent.glob("*") if
                               (get_file_basename(xml) == get_file_basename(image) and str(image).endswith(img_extension))]
         else:
-            globbed_files = glob.glob(xml)
+            globbed_files = xml.rglob('*xml')
             for _file in globbed_files:
-                file_dict[xml] = [image for image in _file.parent.glob("*") if
-                                  (get_file_basename(xml) == get_file_basename(image) and str(image).endswith(
+                file_dict[_file] = [image for image in _file.parent.glob("*") if
+                                  (get_file_basename(_file) == get_file_basename(image) and str(image).endswith(
                                       img_extension))]
     return file_dict
 
