@@ -49,6 +49,7 @@ class ProcessedImage(Image):
         super().__init__(img)
 
         self.orientation = orientation
+        self.rotated_by = 0
         self.background = self.get_background(background)
 
     def get_background(self, background: tuple):
@@ -92,6 +93,7 @@ class ProcessedImage(Image):
         :param angle:
         :return:
         """
+        self.rotated_by = angle
         self.img = rotate_img(self.img, angle, self.background)
 
     def auto_deskew(self):
@@ -104,4 +106,5 @@ class ProcessedImage(Image):
 
         rotated = rotate_img(self.img, angle, self.background)
 
+        self.rotated_by = angle
         self.img = rotated
