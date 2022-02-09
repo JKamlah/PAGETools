@@ -1,14 +1,14 @@
 from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
-from typing import List, Set, Tuple
+from typing import List, Tuple
 
 import numpy as np
-from PIL import Image as IMAGE
+from PIL.Image import fromarray
 from lxml import etree
 from shapely.affinity import scale, translate
 from shapely.geometry import Polygon, Point, LineString, MultiPoint
-from shapely.ops import split
+from shapely.ops import split, nearest_points
 
 from pagetools.src.Image import Image, ProcessedImage
 from pagetools.src.Page import Page
@@ -33,6 +33,7 @@ class Predictor:
         self.psm = psm
 
         self.textline_placeholder = textline_placeholder
+        self.text_placeholder = '���'
 
         self.background = background
         self.padding = padding
@@ -40,7 +41,7 @@ class Predictor:
         self.auto_deskew = auto_deskew
         self.deskew = deskew
 
-        self.skip_existing = True
+        self.skip_existing = skip_existing
 
         self.pred_index = pred_index
 
@@ -56,7 +57,7 @@ class Predictor:
         return images[0] if images else []
 
     @staticmethod
-    def build_element_list(include: List[str], exclude: List[str]) -> Set[str]:
+    def build_element_list(include: List[str], exclude: List[str]) -> Tuple[str]:
         """ Create a list of all elementtypes to be processed """
         element_list = predictable_regions.copy()
         if "*" in exclude:
@@ -68,15 +69,17 @@ class Predictor:
             element_list = predictable_regions.copy()
         elif include:
             element_list.extend([elem_type for elem_type in include if elem_type != "*"])
-        return element_list
+        return tuple(element_list)
 
     def get_element_data(self) -> OrderedDict:
         """ Collect all element to be processed """
         element_data = OrderedDict()
         for element_type in self.element_list:
             element_regions = self.page.tree.getroot().findall(f".//page:{element_type}", namespaces=self.page.ns)
-
             for region in element_regions:
+                # Skip parent elements with child elements which are also in the element list
+                if region.findall('.//*[@id]', namespaces=self.page.ns)[0].tag.endswith(self.element_list):
+                    continue
                 region_id = region.attrib.get("id")
                 if region_id in element_data.keys():
                     continue
@@ -91,26 +94,27 @@ class Predictor:
                                   "type": element_type,
                                   "orientation": orientation,
                                   "coords": string_to_coords(coords),
-                                  "element": region,
-                                  }
+                                  "element": region}
 
                 text_equivs = region.findall("./page:TextEquiv", namespaces=self.page.ns)
                 if len(text_equivs) > 0:
-                    if not self.skip_existing:
+                    if self.skip_existing:
                         continue
 
                 element_data[region_id] = text_line_data
 
         return element_data
 
-    def boundingbox2coords(self, bbox):
+    @staticmethod
+    def boundingbox2coords(bbox):
         """ Create coordinates of bounding boxes """
         return ((bbox[0], bbox[1]),
                 (bbox[2], bbox[1]),
                 (bbox[2], bbox[3]),
                 (bbox[0], bbox[3]))
 
-    def coords2str(self, coords):
+    @staticmethod
+    def coords2str(coords):
         """ Create a string representation of the coordinates """
         return ' '.join([f"{int(np.around(point[0], decimals=1))},{int(np.around(point[1], decimals=1))}"
                          for point in coords])
@@ -153,7 +157,7 @@ class Predictor:
 
         # Create an x and y array of the baseline points
         baseline_xy = list(zip(*deduplicated_sorted_baselinepoints))
-        if basic_baseline != []:
+        if basic_baseline:
             basic_baseline_xy = list(zip(*basic_baseline))
         else:
             basic_baseline_xy = baseline_xy
@@ -209,7 +213,6 @@ class Predictor:
                                (max_x, get_y_value(max_x, -1, basic_baseline_interp_y, new_baseline_y))]
         for pt_idx in [0, -1]:
             if not line_polygon.covers(Point(*fitted_baseline[pt_idx])):
-                from shapely.ops import nearest_points
                 fitted_baseline[pt_idx] = list(nearest_points(line_polygon,
                                                               Point(*fitted_baseline[pt_idx]))[1].coords)[0]
 
@@ -229,7 +232,8 @@ class Predictor:
                     fitted_baseline = LineString(line_polygon.boundary.coords[:2])
         return fitted_baseline
 
-    def tesseract_symbol_bboxs_and_baselines(self, ri, RIL, iterate_level):
+    @staticmethod
+    def tesseract_symbol_bboxs_and_baselines(ri, RIL, iterate_level):
         """ Collect all bboxs and baseline values on symbol/glyph level and reset the iterator"""
         bbox, bboxs = [], []
         baselines, baseline = [], []
@@ -249,7 +253,8 @@ class Predictor:
         ri.Begin()
         return bboxs, baselines
 
-    def shrink_bboxs(self, bboxs: list) -> list:
+    @staticmethod
+    def shrink_bboxs(bboxs: list) -> list:
         """ Correcting tesseracts tendency to overextend the bbox due to dirt on the page  """
         if len(bboxs) > 1 and abs(bboxs[0][2] - bboxs[0][0]) > abs(bboxs[0][1] - bboxs[0][3]) * 2:
             bboxs.pop(0)
@@ -261,12 +266,14 @@ class Predictor:
         """ Create a multipoint object based on single bbox points and calculate the convex hull """
         return MultiPoint([coords for bbox in bboxs for coords in self.boundingbox2coords(bbox)]).convex_hull
 
-    def fit_line_to_region_polygon(self, line_polygon, region_polygon):
+    @staticmethod
+    def fit_line_to_region_polygon(line_polygon, region_polygon):
         """ Calculate the convex hull of the intersection of line-polygon and region-polygon """
         intersection = line_polygon.intersection(region_polygon)
         return intersection.convex_hull
 
-    def rotate_polygon_to_start_from_left_top(self, line_polygon):
+    @staticmethod
+    def rotate_polygon_to_start_from_left_top(line_polygon):
         """ Set the upper left point as starting point and make the rotation clockwise """
         ring = np.asarray(list(line_polygon.exterior.coords)[::-1])
         min_idx = np.argmin(ring, axis=0)[0]
@@ -292,7 +299,12 @@ class Predictor:
         data = self.get_element_data()
         img_orig = ProcessedImage(self.image.get_filename(), background=self.background, orientation=0.0)
         if self.engine == 'tesseract':
-            from tesserocr import PyTessBaseAPI, RIL, iterate_level
+            try:
+                from tesserocr import PyTessBaseAPI, RIL, iterate_level
+            except ModuleNotFoundError as err:
+                # Error handling
+                print(f'ModuleNotFoundError: tesserocr\n{err}')
+                return
             with PyTessBaseAPI(lang=self.lang) as api:
                 for element_idx, (element_id, entry) in enumerate(data.items()):
                     img = deepcopy(img_orig)
@@ -303,13 +315,13 @@ class Predictor:
                     elif self.auto_deskew:
                         img.auto_deskew()
 
-                    region_polygon = MultiPoint(entry["coords"] - \
+                    region_polygon = MultiPoint(entry["coords"] -
                                                 ([entry["coords"].min(axis=0)] - np.array([self.padding[0],
                                                                                            self.padding[
                                                                                                2]]))).convex_hull
                     line_polygon = Polygon()
 
-                    api.SetImage(IMAGE.fromarray(img.img))
+                    api.SetImage(fromarray(img.img))
 
                     for psm in self.psm:
                         api.SetPageSegMode(psm)
@@ -333,7 +345,8 @@ class Predictor:
 
                     for lidx, line in enumerate(iterate_level(ri, RIL.TEXTLINE)):
                         print(
-                            f"{self.xml.with_suffix('').name} ({element_idx + 1}/{len(data)}):\t{element_id}l{line_index}")
+                            f"{self.xml.with_suffix('').name} "
+                            f"({element_idx + 1}/{len(data)}):\t{element_id}l{line_index}")
                         if not line.Empty(RIL.TEXTLINE) or not line_polygon.is_empty:
                             """ XML - Output example:
                             textline = etree.XML(f"<TextLine id="{entry['id']}l{line_index}" 
@@ -346,14 +359,14 @@ class Predictor:
                             </TextLine >")
                             """
                             offset = (min(x[0] for x in entry["coords"]), min(x[1] for x in entry["coords"]))
-                            linetext = '���'
+                            linetext = self.text_placeholder
                             baseline = []
                             if not line.Empty(RIL.TEXTLINE):
                                 baseline = line.Baseline(RIL.TEXTLINE)
-                                linetext = '���' if line.GetUTF8Text(RIL.TEXTLINE).strip() == '' \
+                                linetext = self.text_placeholder if line.GetUTF8Text(RIL.TEXTLINE).strip() == '' \
                                     else line.GetUTF8Text(RIL.TEXTLINE).strip()
                                 # Skip unrecognized textlines in the block end
-                                if linetext == '���' and lidx != 0 and lidx == len(symbol_bboxs) - 1:
+                                if linetext == self.text_placeholder and lidx != 0 and lidx == len(symbol_bboxs) - 1:
                                     continue
                             if line_polygon.is_empty:
                                 # The basic bbox list(line.BoundingBox(RIL.TEXTLINE)) is currently not used
@@ -363,7 +376,7 @@ class Predictor:
                                 line_polygon = self.polygon_from_bboxs(bboxs)
                                 line_polygon = self.fit_line_to_region_polygon(line_polygon, region_polygon)
                                 if line_polygon.is_empty or not isinstance(line_polygon, Polygon) or \
-                                        (line_polygon.length) < 4 or (line_polygon.area / line_polygon.length) < 4:
+                                        line_polygon.length < 4 or (line_polygon.area / line_polygon.length) < 4:
                                     line_polygon = scale(region_polygon,
                                                          xfact=0.75, yfact=0.75, origin='centroid').convex_hull
                             # Fitting the baseline into the polygon
@@ -398,7 +411,7 @@ class Predictor:
                     if fulltext != '' and entry['element'].tag.rsplit('}', 1)[-1] in ['TextRegion']:
                         ele_textregion = etree.SubElement(entry['element'], 'TextEquiv')
                         ele_unicode = etree.SubElement(ele_textregion, 'Unicode')
-                        ele_unicode.text = fulltext
+                        ele_unicode.text = fulltext.rstrip()
 
     def export(self, output: Path):
         self.page.export(output)
