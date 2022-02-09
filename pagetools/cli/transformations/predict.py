@@ -1,15 +1,16 @@
-from pagetools.src.utils import filesystem
-from pagetools.src.prediction.Predictor import Predictor
-from pagetools.src.utils.constants import predictable_regions
-from pagetools.src.utils.filesystem import get_suffix
-
+import shutil
+import sys
+from itertools import repeat
+from multiprocessing import Pool
 from pathlib import Path
 from typing import List, Tuple
-import sys
-import shutil
 
 import click
 
+from pagetools.src.prediction.Predictor import Predictor
+from pagetools.src.utils import filesystem
+from pagetools.src.utils.constants import predictable_regions
+from pagetools.src.utils.filesystem import get_suffix
 
 available_regions = predictable_regions.copy()
 available_regions.append("*")
@@ -40,17 +41,19 @@ available_regions.append("*")
 @click.option("--background-mode", type=click.Choice(["median", "mean", "dominant"]),
               help="Color calc mode to fill up background (overwrites -bg / --background-color).")
 @click.option("-p", "--padding", nargs=4, default=(0, 0, 0, 0), type=int, help="Padding in pixels around the line image"
-                                                                        " cutout (top, bottom, left, right). "
-                                                                        "Recommend for tesseract : (30, 30, 30, 30)")
+                                                                               " cutout (top, bottom, left, right). "
+                                                                               " Recommend for tesseract : "
+                                                                               "(30, 30, 30, 30)")
 @click.option("-ad", "--auto-deskew", is_flag=True, help="Automatically deskew extracted line images using a custom "
                                                          "algorithm (Experimental!).")
 @click.option("-d", "--deskew", default=0.0, type=float, help="Angle for manual clockwise rotation of the line images.")
-@click.option("-pred", "--pred-index", type=int, default=1, help="Index of the TextEquiv elements containing predicted "
+@click.option("-w", "--worker", default=None, type=int, help="Worker for multiprocessing.")
+@click.option("-pred", "--pred-index", default=1, type=int, help="Index of the TextEquiv elements containing predicted "
                                                                  "text.")
 @click.option("-s/-us", "--safe/--unsafe", default=True, help="Creates backups of original files before overwriting.")
 def predict_cli(xmls: List[Path], include: List[str], exclude: List[str], skip_existing: bool, image_extension: str,
                 engine: str, lang: str, psm: Tuple[int], textline_placeholder: bool, output: Path,
-                background_color: Tuple[int], background_mode: str, padding: Tuple[int], pred_index: int,
+                background_color: Tuple[int], background_mode: str, padding: Tuple[int], worker: int, pred_index: int,
                 auto_deskew: bool, deskew: float, safe: bool):
 
     if engine == 'tesseract' and 'tesserocr' in sys.modules:
@@ -68,26 +71,29 @@ def predict_cli(xmls: List[Path], include: List[str], exclude: List[str], skip_e
     else:
         bg = ("color", background_color)
 
-    click.echo(f"Found {len(file_dict)} PAGE XML files…")
+    with Pool(processes=worker) as pool:
+        pool.starmap(predict, zip(file_dict.keys(), file_dict.values(), repeat(include), repeat(exclude),
+                                  repeat(skip_existing), repeat(engine), repeat(lang), repeat(psm),
+                                  repeat(textline_placeholder), repeat(output), repeat(bg), repeat(padding),
+                                  repeat(pred_index), repeat(auto_deskew), repeat(deskew), repeat(safe)))
 
-    with click.progressbar(iterable=file_dict.items(), fill_char=click.style("█", dim=True),
-                           label="Predicting text lines…") as files:
-        for page_idx, (xml, images) in enumerate(files):
-            predictor = Predictor(xml, images, include, exclude, engine, lang, psm, textline_placeholder, output, bg,
-                                  padding, auto_deskew, deskew, pred_index, skip_existing)
-            if not any(images) or \
-                    '.old' in xml.name or Path(xml.parent, xml.stem).with_suffix(f".old{get_suffix(xml)}").exists():
-                continue
-            print(f"Start prediction for {xml.name}")
-            predictor.predict()
-            if safe:
-                shutil.move(xml, Path(xml.parent, xml.stem).with_suffix(f".old{get_suffix(xml)}"))
-            predictor.export(xml)
 
-    click.echo(click.style("Text line prediction finished successfully.", fg='green'))
-
+def predict(xml: Path, images: List[Path], include: List[str], exclude: List[str], skip_existing: bool,
+            engine: str, lang: str, psm: Tuple[int], textline_placeholder: bool, output: Path,
+            bg: Tuple[str], padding: Tuple[int], pred_index: int, auto_deskew: bool, deskew: float, safe: bool):
+    """ Multiprocessable prediction function """
+    if not any(images) or \
+            '.old' in xml.name or Path(xml.parent, xml.stem).with_suffix(f".old{get_suffix(xml)}").exists():
+        print(f"{xml.with_suffix('').name}: prediction cancelled --> no image available")
+        return
+    predictor = Predictor(xml, images, include, exclude, engine, lang, psm, textline_placeholder, output, bg,
+                          padding, auto_deskew, deskew, pred_index, skip_existing)
+    print(f"{xml.with_suffix('').name}: start prediction with {engine} ")
+    predictor.predict()
+    if safe:
+        shutil.move(xml, Path(xml.parent, xml.stem).with_suffix(f".old{get_suffix(xml)}"))
+    predictor.export(xml)
 
 
 if __name__ == "__main__":
     predict_cli()
-
