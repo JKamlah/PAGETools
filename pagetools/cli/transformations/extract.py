@@ -10,7 +10,7 @@ available_regions.append("*")
 
 
 @click.command("extract", help="Extract elements as image (optionally with text) files.")
-@click.argument("xmls", nargs=-1, required=True, type=click.Path())
+@click.argument("xmls", nargs=-1, required=True, type=click.Path(exists=True, path_type=Path))
 @click.option("--include", multiple=True, type=click.Choice(available_regions, case_sensitive=False),
               help="PAGE XML element types to extract (highest priority).")
 @click.option("--exclude", multiple=True, type=click.Choice(available_regions, case_sensitive=False),
