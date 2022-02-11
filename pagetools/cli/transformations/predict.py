@@ -33,7 +33,10 @@ available_regions.append("*")
 @click.option("-psm", default=[4, 7], type=int, multiple=True,
               help="Pagesegementation modes to process the area. If one fails the next psm will be used (4, 7)")
 @click.option("-placeholder", "--textline-placeholder", is_flag=True,
-              help="If no text is found in the region an textline placholder will be created")
+              help="If no text is found in the region a textline placeholder will be created")
+@click.option("-del", "--delete-empty-textlines", is_flag=True, help="Delete empty textlines")
+@click.option("-wildcard", "--text-wildcard", default='���',
+              help="If an empty textline is found the wildcard string is insert instead")
 @click.option("-o", "--output", type=click.Path(path_type=Path), default=Path.cwd(),
               help="Path where generated files will get saved.")
 @click.option("-bg", "--background-color", nargs=3, default=(255, 255, 255), type=int,
@@ -50,11 +53,15 @@ available_regions.append("*")
 @click.option("-w", "--worker", default=None, type=int, help="Worker for multiprocessing.")
 @click.option("-pred", "--pred-index", default=1, type=int, help="Index of the TextEquiv elements containing predicted "
                                                                  "text.")
+@click.option("-src", "--source-index", default=0, type=int, help="Only necessary if existing TextLines should be used,"
+                                                                  "if TextLines are not indexed yet the source_index"
+                                                                  "will be set automatically")
 @click.option("-s/-us", "--safe/--unsafe", default=True, help="Creates backups of original files before overwriting.")
 def predict_cli(xmls: List[Path], include: List[str], exclude: List[str], skip_existing: bool, image_extension: str,
-                engine: str, lang: str, psm: Tuple[int], textline_placeholder: bool, output: Path,
-                background_color: Tuple[int], background_mode: str, padding: Tuple[int], worker: int, pred_index: int,
-                auto_deskew: bool, deskew: float, safe: bool):
+                engine: str, lang: str, psm: Tuple[int], textline_placeholder: bool, text_wildcard: str,
+                delete_empty_textlines: bool, output: Path, background_color: Tuple[int], background_mode: str,
+                padding: Tuple[int], worker: int, pred_index: int, source_index: int, auto_deskew: bool, deskew: float,
+                safe: bool):
 
     if engine == 'tesseract' and 'tesserocr' in sys.modules:
         "Please install tesserocr (with wheels) to use tesseract engine"
@@ -74,20 +81,24 @@ def predict_cli(xmls: List[Path], include: List[str], exclude: List[str], skip_e
     with Pool(processes=worker) as pool:
         pool.starmap(predict, zip(file_dict.keys(), file_dict.values(), repeat(include), repeat(exclude),
                                   repeat(skip_existing), repeat(engine), repeat(lang), repeat(psm),
-                                  repeat(textline_placeholder), repeat(output), repeat(bg), repeat(padding),
-                                  repeat(pred_index), repeat(auto_deskew), repeat(deskew), repeat(safe)))
+                                  repeat(textline_placeholder), repeat(text_wildcard), repeat(delete_empty_textlines),
+                                  repeat(output), repeat(bg), repeat(padding), repeat(pred_index), repeat(source_index),
+                                  repeat(auto_deskew), repeat(deskew), repeat(safe)))
 
 
 def predict(xml: Path, images: List[Path], include: List[str], exclude: List[str], skip_existing: bool,
-            engine: str, lang: str, psm: Tuple[int], textline_placeholder: bool, output: Path,
-            bg: Tuple[str], padding: Tuple[int], pred_index: int, auto_deskew: bool, deskew: float, safe: bool):
+            engine: str, lang: str, psm: Tuple[int], textline_placeholder: bool,
+            text_wildcard: str, delete_empty_textlines: bool, output: Path, bg: Tuple[str], padding: Tuple[int],
+            pred_index: int, source_index:  int, auto_deskew: bool, deskew: float, safe: bool):
     """ Multiprocessable prediction function """
     if not any(images) or \
             '.old' in xml.name or Path(xml.parent, xml.stem).with_suffix(f".old{get_suffix(xml)}").exists():
-        print(f"{xml.with_suffix('').name}: prediction cancelled --> no image available")
+        print(f"{xml.with_suffix('').name}: "
+              f"prediction cancelled --> no image available or an old version already exists")
         return
-    predictor = Predictor(xml, images, include, exclude, engine, lang, psm, textline_placeholder, output, bg,
-                          padding, auto_deskew, deskew, pred_index, skip_existing)
+    predictor = Predictor(xml, images, include, exclude, engine, lang, psm, textline_placeholder, text_wildcard,
+                          delete_empty_textlines,output, bg, padding, auto_deskew,
+                          deskew, pred_index, source_index, skip_existing)
     print(f"{xml.with_suffix('').name}: start prediction with {engine} ")
     predictor.predict()
     if safe:
