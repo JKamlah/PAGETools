@@ -103,8 +103,7 @@ class ProcessedImage(Image):
         """
         grayscale = cv2.cvtColor(self.img, cv2.COLOR_BGR2GRAY)
         angle = determine_skew(grayscale)
-
-        rotated = rotate_img(self.img, angle, self.background)
-
-        self.rotated_by = angle
-        self.img = rotated
+        if angle is not None:
+            rotated = rotate_img(self.img, angle, self.background)
+            self.rotated_by = angle
+            self.img = rotated
