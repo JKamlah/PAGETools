@@ -6,7 +6,7 @@ from typing import List, Tuple
 import numpy as np
 from PIL.Image import fromarray
 from lxml import etree
-from shapely.affinity import scale, translate
+from shapely.affinity import scale, translate, rotate, interpret_origin
 from shapely.geometry import Polygon, Point, LineString, MultiPoint
 from shapely.ops import split, nearest_points
 
@@ -18,8 +18,9 @@ from pagetools.src.utils.page_processing import string_to_coords
 
 class Predictor:
     def __init__(self, xml: Path, images: List[Path], include: List[str], exclude: List[str], engine: str, lang: str,
-                 psm: Tuple[int], textline_placeholder: bool, out: Path, background, padding: Tuple[int],
-                 auto_deskew: bool, deskew: float, pred_index: int, skip_existing: bool):
+                 psm: Tuple[int], textline_placeholder: bool, text_wildcard: str, delete_empty_textlines: bool,
+                 out: Path, background, padding: Tuple[int], auto_deskew: bool, deskew: float,
+                 pred_index: int, source_index: int, skip_existing: bool):
         self.xml = xml
         self.page = self.xml_to_page(xml)
         self.image = self.get_image(images)
@@ -33,7 +34,8 @@ class Predictor:
         self.psm = psm
 
         self.textline_placeholder = textline_placeholder
-        self.text_placeholder = '���'
+        self.text_wildcard = text_wildcard
+        self.delete_empty_textlines = delete_empty_textlines
 
         self.background = background
         self.padding = padding
@@ -44,6 +46,7 @@ class Predictor:
         self.skip_existing = skip_existing
 
         self.pred_index = pred_index
+        self.source_index = source_index
 
     @staticmethod
     def xml_to_page(xml: Path):
@@ -74,16 +77,20 @@ class Predictor:
     def get_element_data(self) -> OrderedDict:
         """ Collect all element to be processed """
         element_data = OrderedDict()
+        self.change_index()
         for element_type in self.element_list:
             element_regions = self.page.tree.getroot().findall(f".//page:{element_type}", namespaces=self.page.ns)
             for region in element_regions:
                 # Skip parent elements with child elements which are also in the element list
-                if region.findall('.//*[@id]', namespaces=self.page.ns)[0].tag.endswith(self.element_list):
+                ele_with_id = region.findall('.//*[@id]', namespaces=self.page.ns)
+                if ele_with_id and ele_with_id[0].tag.endswith(self.element_list):
                     continue
                 region_id = region.attrib.get("id")
                 if region_id in element_data.keys():
                     continue
                 if element_type == "TextLine":
+                    if region.get('index') != str(self.source_index):
+                        continue
                     orientation = float(region.getparent().attrib.get("orientation", 0))
                 else:
                     orientation = float(region.attrib.get("orientation", 0))
@@ -104,6 +111,19 @@ class Predictor:
                 element_data[region_id] = text_line_data
 
         return element_data
+
+    def change_index(self):
+        # Delete existing text equivs with the same pred_index and give text equivs with no index The pred_index +1
+        for text_equiv in self.page.get_text_equivs():
+            if text_equiv.get("index") == self.pred_index and not self.skip_existing:
+                text_equiv.getparent().remove(text_equiv)
+            elif text_equiv.get("index") is None:
+                self.source_index = self.pred_index
+                if not self.skip_existing:
+                    self.source_index += 1
+                text_equiv.set("index", str(self.source_index))
+
+
 
     @staticmethod
     def boundingbox2coords(bbox):
@@ -224,6 +244,8 @@ class Predictor:
                     if line_polygon.covers(fitted_baseline_split):
                         fitted_baseline = fitted_baseline_split
                         break
+                else:
+                    fitted_baseline = line_polygon.intersection(fitted_baseline)
             except:
                 # If there is no other possibility take the first two points of the lower_boundary or line_polygon
                 if len(lower_boundary) > 1:
@@ -319,11 +341,15 @@ class Predictor:
                                                 ([entry["coords"].min(axis=0)] - np.array([self.padding[0],
                                                                                            self.padding[
                                                                                                2]]))).convex_hull
+                    if img.rotated_by:
+                        region_polygon = rotate(region_polygon, img.rotated_by, 'center')
                     line_polygon = Polygon()
 
                     api.SetImage(fromarray(img.img))
 
-                    for psm in self.psm:
+                    psms = self.psm if entry['type'] != 'TextLine' else (13, 7)
+
+                    for psm in psms:
                         api.SetPageSegMode(psm)
                         api.Recognize()
                         ri = api.GetIterator()
@@ -359,14 +385,15 @@ class Predictor:
                             </TextLine >")
                             """
                             offset = (min(x[0] for x in entry["coords"]), min(x[1] for x in entry["coords"]))
-                            linetext = self.text_placeholder
+                            linetext = self.text_wildcard
                             baseline = []
                             if not line.Empty(RIL.TEXTLINE):
                                 baseline = line.Baseline(RIL.TEXTLINE)
-                                linetext = self.text_placeholder if line.GetUTF8Text(RIL.TEXTLINE).strip() == '' \
+                                linetext = self.text_wildcard if line.GetUTF8Text(RIL.TEXTLINE).strip() == '' \
                                     else line.GetUTF8Text(RIL.TEXTLINE).strip()
-                                # Skip unrecognized textlines in the block end
-                                if linetext == self.text_placeholder and lidx != 0 and lidx == len(symbol_bboxs) - 1:
+                                # Skip unrecognized textlines if set and or is last in the textblock in the block end
+                                if self.delete_empty_textlines or \
+                                        linetext == self.text_wildcard and lidx != 0 and lidx == len(symbol_bboxs) - 1:
                                     continue
                             if line_polygon.is_empty:
                                 # The basic bbox list(line.BoundingBox(RIL.TEXTLINE)) is currently not used
@@ -384,34 +411,61 @@ class Predictor:
                             baseline_linestring = self.fit_baseline2polygon(symbol_baselines[lidx],
                                                                             baseline, line_polygon)
 
+                            # Undo rotation by deskewing
+                            # Rotate degrees CCW from origin at the center of bbox
+                            if img.rotated_by != 0:
+                                pass
+                                line_polygon = rotate(line_polygon, img.rotated_by*-1, 'center')
+                                # Use the center of the line to rotate the baseline
+                                baseline_linestring = rotate(baseline_linestring, img.rotated_by*-1,
+                                                             interpret_origin(line_polygon, 'center', 2))
+
                             # Add offset to polygons/lines
                             line_polygon = translate(line_polygon, xoff=offset[0] - self.padding[0],
                                                      yoff=offset[1] - self.padding[2])
                             baseline_linestring = translate(baseline_linestring, xoff=offset[0] - self.padding[0],
                                                             yoff=offset[1] - self.padding[2])
 
-                            ele_textline = etree.SubElement(entry['element'], 'TextLine',
+
+                            if entry['type'] != 'TextLine':
+                                ele_textline = etree.SubElement(entry['element'], 'TextLine',
                                                             {'id': f"{element_id}l{line_index}",
                                                              'custom': f"readingOrder {{index:{line_index};}}"})
-                            etree.SubElement(ele_textline, 'Coords',
+                                etree.SubElement(ele_textline, 'Coords',
                                              {'points': self.coords2str(list(line_polygon.exterior.coords))})
-                            etree.SubElement(ele_textline, 'Baseline',
+                                etree.SubElement(ele_textline, 'Baseline',
                                              {'points': self.coords2str(list(baseline_linestring.coords))})
                             # Writing TextEquiv parameters but index and conf aren't added currently
                             # not included: {'index': str(self.pred_index), 'conf': str(line.Confidence(RIL.TEXTLINE))})
-                            ele_textequiv = etree.SubElement(ele_textline, 'TextEquiv')
+                            else:
+                                ele_textline = entry['element']
+                            ele_textequiv = etree.SubElement(ele_textline, 'TextEquiv', {'index': str(self.pred_index)})
                             ele_unicode = etree.SubElement(ele_textequiv, 'Unicode')
                             ele_unicode.text = linetext
-                            fulltext += ele_unicode.text + '\n'
+                            fulltext += '\n'+ele_unicode.text
                             line_index += 1
                             line_polygon = Polygon()
                         else:
                             print("No text found!")
                     # Does only TextRegion need a fulltext summary of TextLines?
-                    if fulltext != '' and entry['element'].tag.rsplit('}', 1)[-1] in ['TextRegion']:
-                        ele_textregion = etree.SubElement(entry['element'], 'TextEquiv')
+                    if entry['element'].tag.endswith('TextLine'):
+                        ele_parent = entry['element'].getparent()
+                        ele_textequiv = ele_parent.find(f"./page:TextEquiv[@index='{self.pred_index}']",
+                                                     namespaces=self.page.ns)
+                        if ele_textequiv is None:
+                            ele_textequiv = etree.SubElement(ele_parent,
+                                                             f"{{{self.page.ns['page']}}}TextEquiv",
+                                                             {'index': str(self.pred_index)})
+                            ele_unicode = etree.SubElement(ele_textequiv, 'Unicode')
+                            ele_unicode.text = fulltext.lstrip()
+                        else:
+                            ele_unicode = ele_textequiv.find('Unicode')
+                            ele_unicode.text = (ele_unicode.text + fulltext).lstrip()
+                    elif fulltext != '' and entry['element'].tag.endswith('TextRegion'):
+                        ele_textregion = etree.SubElement(entry['element'], 'TextEquiv',
+                                                          {'index': str(self.pred_index)})
                         ele_unicode = etree.SubElement(ele_textregion, 'Unicode')
-                        ele_unicode.text = fulltext.rstrip()
+                        ele_unicode.text = fulltext.lstrip()
 
     def export(self, output: Path):
         self.page.export(output)
