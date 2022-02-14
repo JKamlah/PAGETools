@@ -63,6 +63,8 @@ class Page:
                 coords = region.find("./page:Coords", namespaces=self.ns).attrib["points"]
 
                 text_line_data = {"id": region.attrib.get("id"),
+                                  "type": element_type,
+                                  "element": region,
                                   "orientation": orientation,
                                   "coords": string_to_coords(coords),
                                   "text_equivs": []
