@@ -5,6 +5,8 @@ from pagetools.src.utils.constants import extractable_regions
 
 from pathlib import Path
 from typing import List, Iterator, Set, Tuple
+from collections import defaultdict
+import re
 
 
 class Extractor:
@@ -17,6 +19,7 @@ class Extractor:
         self.element_list = self.build_element_list(include, exclude)
 
         self.extract_text = not no_text
+        self.extract_fulltext_only = True
 
         self.out = out
         self.enumerate_output = enumerate_output
@@ -52,8 +55,60 @@ class Extractor:
             element_list.extend([elem_type for elem_type in include if elem_type != "*"])
         return element_list
 
+    def reading_order(self):
+        ro_dict = defaultdict()
+        ro_ele = self.xml.tree.getroot().find(f".//page:ReadingOrder", namespaces=self.xml.ns)
+        ordered_ro_ele = ro_ele.find(f".//page:OrderedGroup", namespaces=self.xml.ns)
+        for child in ordered_ro_ele:
+            ro_dict[child.get('regionRef')] = int(child.get('index', '0'))
+        return ro_dict
+
+    def fulltext(self):
+        fulltexts = defaultdict(lambda: defaultdict(list))
+        ro_dict = self.reading_order()
+        for entry in self.xml.get_element_data({'TextRegion', 'TableRegion'}):
+            if entry['type'] == 'TableRegion':
+                ro = re.match('readingOrder {index:([0-9]*);}', entry['element'].get('custom', ''))
+                ro = int(ro[1]) if ro else ro_dict.get(entry['element'].get('id'), -1)
+                tablecontents = defaultdict(lambda: defaultdict(dict))
+                for cell in entry['element'].findall("./page:TableCell", namespaces=self.xml.ns):
+                    text_equivs = cell.findall('.//page:TextEquiv', namespaces=self.xml.ns)
+                    content = defaultdict(str)
+                    if text_equivs is not None:
+                        for text_equiv in text_equivs:
+                            content[text_equiv.get('index')] += ' ' + \
+                                                                "".join(text_equiv.find(
+                                                                    "./page:Unicode",
+                                                                    namespaces=self.xml.ns).itertext())
+                    else:
+                        content['all'] += cell.text
+                    for row in range(int(cell.get('row')), int(cell.get('row')) + int(cell.get('rowSpan'))):
+                        for col in range(int(cell.get('col')), int(cell.get('col')) + int(cell.get('colSpan'))):
+                            for table_index, c_text in content.items():
+                                tablecontents[table_index][row][col] = c_text
+                all_contents = tablecontents.pop('all', [])
+                for table_index in tablecontents.keys():
+                    tablecontents[table_index].update(all_contents)
+                for index, tablecontent in tablecontents.items():
+                    fulltexts[index][ro].extend(['\t'.join(sorted(col_dict.values())) for row, col_dict in
+                                             sorted(tablecontent.items())])
+
+            for text_equiv in entry['text_equivs']:
+                ro = re.match('readingOrder {index:([0-9]*);}', entry['element'].get('custom', ''))
+                ro = int(ro[1]) if ro else ro_dict.get(entry['element'].get('id'), -1)
+                fulltexts[text_equiv['index']][ro].extend(text_equiv['content'])
+        for index, fulltext in fulltexts.items():
+            with self.xml.get_filename().with_suffix(f"{'' if index is None else '_'+index if index > 0 else '.gt'}"
+                                                     f".txt").open("w") as textfile:
+                textfile.write('\n'.join(['\n'.join(val) for key, val in sorted(fulltext.items())]))
+        return
+
     # TODO: Rewrite as soon as PAGEpy is available
     def extract(self, enumerator):
+
+        if self.extract_fulltext_only:
+            return self.fulltext()
+
         data = self.xml.get_element_data(self.element_list)
 
         for image in self.images:
