@@ -28,7 +28,6 @@ class Predictor:
         self.element_list = self.build_element_list(include, exclude)
 
         self.out = out
-
         self.engine = engine
         self.lang = lang
         self.psm = psm
@@ -47,6 +46,7 @@ class Predictor:
 
         self.pred_index = pred_index
         self.source_index = source_index
+        self.text_equiv_attrib = {'index': str(self.pred_index)}
 
     @staticmethod
     def xml_to_page(xml: Path):
@@ -89,7 +89,7 @@ class Predictor:
                 if region_id in element_data.keys():
                     continue
                 if element_type == "TextLine":
-                    if region.get('index') != str(self.source_index):
+                    if region.find(f"./page:TextEquiv[@index='{self.source_index}']", namespaces=self.page.ns) is None:
                         continue
                     orientation = float(region.getparent().attrib.get("orientation", 0))
                 else:
@@ -103,9 +103,10 @@ class Predictor:
                                   "coords": string_to_coords(coords),
                                   "element": region}
 
-                text_equivs = region.findall("./page:TextEquiv", namespaces=self.page.ns)
-                if len(text_equivs) > 0:
-                    if self.skip_existing:
+                if element_type != "TextLine" and region.findall("./page:TextEquiv",
+                                                                  namespaces=self.page.ns) is not None:
+                    if self.skip_existing and region.find(f"./page:TextEquiv[@index='{self.pred_index}']",
+                                                          namespaces=self.page.ns) is not None:
                         continue
 
                 element_data[region_id] = text_line_data
@@ -118,12 +119,8 @@ class Predictor:
             if text_equiv.get("index") == self.pred_index and not self.skip_existing:
                 text_equiv.getparent().remove(text_equiv)
             elif text_equiv.get("index") is None:
-                self.source_index = self.pred_index
-                if not self.skip_existing:
-                    self.source_index += 1
+                self.source_index = self.pred_index if self.skip_existing else self.pred_index + 1
                 text_equiv.set("index", str(self.source_index))
-
-
 
     @staticmethod
     def boundingbox2coords(bbox):
@@ -428,9 +425,9 @@ class Predictor:
 
 
                             if entry['type'] != 'TextLine':
-                                ele_textline = etree.SubElement(entry['element'], 'TextLine',
-                                                            {'id': f"{element_id}l{line_index}",
-                                                             'custom': f"readingOrder {{index:{line_index};}}"})
+                                line_attribs = {'id': f"{element_id}l{line_index}",
+                                                'custom': f"readingOrder {{index:{line_index};}}"}
+                                ele_textline = etree.SubElement(entry['element'], 'TextLine', line_attribs)
                                 etree.SubElement(ele_textline, 'Coords',
                                              {'points': self.coords2str(list(line_polygon.exterior.coords))})
                                 etree.SubElement(ele_textline, 'Baseline',
@@ -439,7 +436,7 @@ class Predictor:
                             # not included: {'index': str(self.pred_index), 'conf': str(line.Confidence(RIL.TEXTLINE))})
                             else:
                                 ele_textline = entry['element']
-                            ele_textequiv = etree.SubElement(ele_textline, 'TextEquiv', {'index': str(self.pred_index)})
+                            ele_textequiv = etree.SubElement(ele_textline, 'TextEquiv', self.text_equiv_attrib)
                             ele_unicode = etree.SubElement(ele_textequiv, 'Unicode')
                             ele_unicode.text = linetext
                             fulltext += '\n'+ele_unicode.text
@@ -450,20 +447,21 @@ class Predictor:
                     # Does only TextRegion need a fulltext summary of TextLines?
                     if entry['element'].tag.endswith('TextLine'):
                         ele_parent = entry['element'].getparent()
-                        ele_textequiv = ele_parent.find(f"./page:TextEquiv[@index='{self.pred_index}']",
-                                                     namespaces=self.page.ns)
-                        if ele_textequiv is None:
-                            ele_textequiv = etree.SubElement(ele_parent,
-                                                             f"{{{self.page.ns['page']}}}TextEquiv",
-                                                             {'index': str(self.pred_index)})
-                            ele_unicode = etree.SubElement(ele_textequiv, 'Unicode')
-                            ele_unicode.text = fulltext.lstrip()
-                        else:
-                            ele_unicode = ele_textequiv.find('Unicode')
-                            ele_unicode.text = (ele_unicode.text + fulltext).lstrip()
+                        if ele_parent.tag.endswith('TextRegion'):
+                            ele_textequiv = ele_parent.find(f"./page:TextEquiv[@index='{self.pred_index}']",
+                                                         namespaces=self.page.ns)
+                            if ele_textequiv is None:
+                                ele_textequiv = etree.SubElement(ele_parent,
+                                                                 f"{{{self.page.ns['page']}}}TextEquiv",
+                                                                 self.text_equiv_attrib)
+                                ele_unicode = etree.SubElement(ele_textequiv, 'Unicode')
+                                ele_unicode.text = fulltext.lstrip()
+                            else:
+                                ele_unicode = ele_textequiv.find('Unicode')
+                                ele_unicode.text = (ele_unicode.text + fulltext).lstrip()
                     elif fulltext != '' and entry['element'].tag.endswith('TextRegion'):
                         ele_textregion = etree.SubElement(entry['element'], 'TextEquiv',
-                                                          {'index': str(self.pred_index)})
+                                                          self.text_equiv_attrib)
                         ele_unicode = etree.SubElement(ele_textregion, 'Unicode')
                         ele_unicode.text = fulltext.lstrip()
 
