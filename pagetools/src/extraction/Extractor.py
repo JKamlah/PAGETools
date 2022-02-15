@@ -81,26 +81,31 @@ class Extractor:
                                                                     "./page:Unicode",
                                                                     namespaces=self.xml.ns).itertext())
                     else:
-                        content['all'] += cell.text
-                    for row in range(int(cell.get('row')), int(cell.get('row')) + int(cell.get('rowSpan'))):
-                        for col in range(int(cell.get('col')), int(cell.get('col')) + int(cell.get('colSpan'))):
+                        content['all'] += ''
+                    max_row = int(cell.get('row')) + int(cell.get('rowSpan')) - 1
+                    max_col = int(cell.get('col')) + int(cell.get('colSpan')) - 1
+                    for row in range(int(cell.get('row')), max_row+1):
+                        for col in range(int(cell.get('col')), max_col+1):
                             for table_index, c_text in content.items():
-                                tablecontents[table_index][row][col] = c_text
-                all_contents = tablecontents.pop('all', [])
-                for table_index in tablecontents.keys():
-                    tablecontents[table_index].update(all_contents)
+                                if row != max_row or col != int(cell.get('col')):
+                                    tablecontents[table_index][row][col] = ''
+                                else:
+                                    tablecontents[table_index][row][col] = c_text.lstrip()
+                for all_contents in tablecontents.pop('all', []):
+                    for table_index in tablecontents.keys():
+                        tablecontents[table_index].update(all_contents)
                 for index, tablecontent in tablecontents.items():
-                    fulltexts[index][ro].extend(['\t'.join(sorted(col_dict.values())) for row, col_dict in
-                                             sorted(tablecontent.items())])
+                    fulltexts[index][ro].extend(['\t'.join([col_content for col, col_content in sorted(col_dict.items())])
+                                                 for row, col_dict in sorted(tablecontent.items())])
 
             for text_equiv in entry['text_equivs']:
                 ro = re.match('readingOrder {index:([0-9]*);}', entry['element'].get('custom', ''))
                 ro = int(ro[1]) if ro else ro_dict.get(entry['element'].get('id'), -1)
-                fulltexts[text_equiv['index']][ro].extend(text_equiv['content'])
+                fulltexts[text_equiv['index']][ro].append(text_equiv['content'])
         for index, fulltext in fulltexts.items():
             with self.xml.get_filename().with_suffix(f"{'' if index is None else '_'+index if index > 0 else '.gt'}"
                                                      f".txt").open("w") as textfile:
-                textfile.write('\n'.join(['\n'.join(val) for key, val in sorted(fulltext.items())]))
+                textfile.write('\n'.join(['\n'.join(text_content) for ro, text_content in sorted(fulltext.items())]))
         return
 
     # TODO: Rewrite as soon as PAGEpy is available
